@@ -25,6 +25,14 @@
 # 2019, 2020
 ###############################################################################
 
+# and draw them on the image
+#3	for (x, y) in shape:
+#		cv2.circle(image, (x, y), 1, (0, 0, 255), -1)
+
+#        shape = face_utils.shape_to_np(shape)
+#
+#        from imutils import face_utils
+
 ###############################################################################
 # Imports
 ###############################################################################
@@ -55,24 +63,28 @@ display_height  = int(monitor[0].height * 0.8)
 face_size       = 150
 time_history    = 60 # minutes
 multiproc       = False
+max_display_interval = 0.030
 
 ###############################################################################
 # Functions
 ###############################################################################
 
-def face_process(q_in, q_out):
+def face_process(q_in, q_out, is_cuda):
     """ 
     Service routine to process face information in separate process
     """
     while True:
-        rgb_small_frame = q_in.get()
+        frame = q_in.get()
         # Find all the face locations and face encodings in the current frame of video
         # This is where program spends most time
-        face_locations = face_recognition.face_locations(rgb_small_frame) # 50-120ms
+        if is_cuda:
+            face_locations = face_recognition.face_locations(frame, model="cnn") # 50-120ms
+        else:
+            face_locations = face_recognition.face_locations(frame) # 50-120ms
         # print("Face Recognition{}".format((cv2.getTickCount()-tmp)/tickspersecond))
         # tmp = cv2.getTickCount()
 
-        face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations) # 500ms
+        face_encodings = face_recognition.face_encodings(frame, face_locations) # 500ms
         # print("Face Encodings{}".format((cv2.getTickCount()-tmp)/tickspersecond))
         # tmp = cv2.getTickCount()
         q_out.put( zip(face_locations, face_encodings) )
@@ -210,7 +222,7 @@ def update_display_frame_with_recent_visitors(display_frame, time_history):
     cv2.putText(display_frame, "Face In: Urs Utzinger 2020", ( 10, display_height - 35), cv2.FONT_HERSHEY_DUPLEX, 1, (255, 255, 255), 1)
     return display_frame
 
-def main_loop():
+def main_loop(is_cuda):
     """
     This is the  main program that is terminated when users closes window or asks to stop
     """
@@ -218,7 +230,7 @@ def main_loop():
         q_img = multiprocessing.Queue()
         q_face = multiprocessing.Queue()
         # creating new processes
-        p = multiprocessing.Process(target=face_process, args=(q_img, q_face)) 
+        p = multiprocessing.Process(target=face_process, args=(q_img, q_face, is_cuda)) 
         p.start()
 
     # Preallocate display image and create display window
@@ -231,10 +243,23 @@ def main_loop():
     face_locations    = []
     tickspersecond    = cv2.getTickFrequency() # Used to profile for CPU usage
     last_display_time = time.time()
-    last_fps_time     = time.time()
     last_face_save_time = time.time()
     frame_height      = int(camera.height)
     frame_width       = int(camera.width)
+
+    if frame_height <= 720:
+        down_sampling = 0.5
+        up_sampling = 2
+    else:
+        down_sampling = 0.25
+        up_sampling = 4
+
+    if is_cuda:
+        fmodel = "cnn"
+    else:
+        fmodel = "hog"
+    
+    update_face_display = False
 
     while cv2.getWindowProperty("Registration", 0) >= 0:
         current_time = time.time()
@@ -246,8 +271,8 @@ def main_loop():
         ########################################
         if camera.new_frame:
             frame = camera.frame # 0.4ms
-            # Resize frame of video to 1/4 size for faster face recognition processing
-            small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25) # <1ms
+            # Resize frame of video for faster face recognition processing
+            small_frame = cv2.resize(frame, (0, 0), fx=down_sampling, fy=down_sampling) # <1ms
             # Convert the image from BGR color (which OpenCV uses) to RGB color (which face_recognition uses)            
             # rgb_small_frame = small_frame[:, :, ::-1] # 0.02ms
             rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
@@ -258,9 +283,9 @@ def main_loop():
         # Update face locations
         # > 500ms
         #######################
-        if multiproc: # get the face data from the processors
-            if not q_out.empty():
-                tmp = q_out.get()
+        if multiproc: # get face data from the processors
+            if not q_face.empty():
+                tmp = q_face.get()
                 face_locations, face_encodings = zip(*tmp)
                 if face_locations is not None or not face_locations == []:
                     new_face_locations = True
@@ -268,7 +293,7 @@ def main_loop():
             if new_display_frame:
                 # Find all the face locations and face encodings in the current frame of video
                 # This is where program spends most time
-                face_locations = face_recognition.face_locations(rgb_small_frame) # 50-120ms
+                face_locations = face_recognition.face_locations(rgb_small_frame, model="fmodel") # 50-120ms
                 face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations) # 500ms
                 if not face_locations == []:
                     new_face_locations = True
@@ -296,8 +321,8 @@ def main_loop():
                     top, right, bottom, left = face_location
                     width = right - left
                     height = bottom - top
-                    #  make sure image for new face is larger than required size
-                    if height > 1.2*face_size:
+                    #  make sure image for new face is at least the required size
+                    if height >= face_size:
                         face_image = small_frame[top:bottom, left:right]
                         # scale to desired height
                         face_image = cv2.resize(face_image, (int(width*face_size/height), face_size))
@@ -310,15 +335,16 @@ def main_loop():
                 #######################################################
                 for (top, right, bottom, left), face_label in zip(face_locations, face_labels):
                     # Scale back up face locations since the frame we detected in was scaled to 1/4 size
-                    top    *= 4
-                    right  *= 4
-                    bottom *= 4
-                    left   *= 4
+                    top    *= up_sampling
+                    right  *= up_sampling
+                    bottom *= up_sampling
+                    left   *= up_sampling
                     # Draw a box around the face
                     cv2.rectangle(frame, (left, top), (right, bottom), (0, 0, 255), 2)
                     # Draw a label with a name below the face
                     cv2.rectangle(frame, (left, bottom - 35), (right, bottom), (0, 0, 255), cv2.FILLED)
                     cv2.putText(frame, face_label, (left + 6, bottom - 6), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
+                    # Draw a dot on faceencoding locations
 
                 if number_of_recent_visitors > 0:
                     cv2.putText(frame, "Visitors at Registrtion", (5, 18), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
@@ -350,6 +376,11 @@ def main_loop():
             save_known_faces()
             break
 
+        # Limit frame rate on display
+        #############################
+        time_remaining = max_display_interval - (time.time() - current_time) 
+        if time_remaining > 0.001: time.sleep(time_remaining)
+
     # Release handle to window
     cv2.destroyAllWindows()
 
@@ -359,7 +390,8 @@ if __name__ == "__main__":
 
     # Figure out which camera driver to use
     #######################################
-    plat = platform.system() 
+    plat = platform.system()
+    is_cuda = False 
     if plat == 'Windows': 
         from cv2capture import cv2Capture
         camera = cv2Capture()
@@ -367,6 +399,7 @@ if __name__ == "__main__":
         if platform.machine() == "aarch64":
             from nanocapture import nanoCapture
             camera = nanoCapture()
+            is_cuda = True
         elif platform.machine() == "armv6l":
             from picapture import piCapture
             camera = piCapture()
@@ -382,5 +415,5 @@ if __name__ == "__main__":
     print("Starting Capture")
     camera.start()
     load_known_faces()
-    main_loop()
+    main_loop(is_cuda)
     camera.stop()
