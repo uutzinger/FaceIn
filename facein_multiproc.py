@@ -25,21 +25,27 @@
 # 2019, 2020
 ###############################################################################
 
+# and draw them on the image
+#3	for (x, y) in shape:
+#		cv2.circle(image, (x, y), 1, (0, 0, 255), -1)
+
+#        shape = face_utils.shape_to_np(shape)
+#
+#        from imutils import face_utils
+
 ###############################################################################
 # Imports
 ###############################################################################
+import face_recognition
+import cv2
 import numpy as np
 import platform
 import pickle
 import logging
 import time
-import cv2
-import face_recognition
-import logging
-
 from   datetime   import datetime, timedelta
 from   screeninfo import get_monitors
-from   faceproc   import faceProc
+import multiprocessing
 
 ###############################################################################
 # Intializing
@@ -48,6 +54,7 @@ from   faceproc   import faceProc
 # Our list of known face encodings and a matching list of metadata about each face.
 known_face_encodings = []
 known_face_metadata = []
+number_of_recent_visitors = 0
 
 # Figure out ideal window size
 monitor = get_monitors()
@@ -55,11 +62,32 @@ display_width   = int(monitor[0].width * 0.8)
 display_height  = int(monitor[0].height * 0.8)
 face_size       = 150
 time_history    = 60 # minutes
+multiproc       = False
 max_display_interval = 0.030
 
 ###############################################################################
 # Functions
 ###############################################################################
+
+def face_process(q_in, q_out, is_cuda):
+    """ 
+    Service routine to process face information in separate process
+    """
+    while True:
+        frame = q_in.get()
+        # Find all the face locations and face encodings in the current frame of video
+        # This is where program spends most time
+        if is_cuda:
+            face_locations = face_recognition.face_locations(frame, model="cnn") # 50-120ms
+        else:
+            face_locations = face_recognition.face_locations(frame) # 50-120ms
+        # print("Face Recognition{}".format((cv2.getTickCount()-tmp)/tickspersecond))
+        # tmp = cv2.getTickCount()
+
+        face_encodings = face_recognition.face_encodings(frame, face_locations) # 500ms
+        # print("Face Encodings{}".format((cv2.getTickCount()-tmp)/tickspersecond))
+        # tmp = cv2.getTickCount()
+        q_out.put( zip(face_locations, face_encodings) )
 
 def save_known_faces():
     """
@@ -145,39 +173,8 @@ def lookup_known_face(face_encoding):
 
     return metadata
 
-def create_face_labels():
-    face_locations = face.face_locations
-    face_encodings = face.face_encodings
-    face_labels = []
-    # 0.2ms
-    # Loop through each detected face and see if it is one we have seen before
-    # If so, we'll give it a label that we'll draw on top of the video.
-    for face_location, face_encoding in zip(face_locations, face_encodings):
-        # See if this face is in our list of known faces
-        ################################################
-        metadata = lookup_known_face(face_encoding)
-        # If we found the face, label the face with some useful information.
-        if metadata is not None:
-            time_at_door = datetime.now() - metadata['first_seen_this_interaction']
-            face_label = f"{metadata['First']} {int(time_at_door.total_seconds())}s"
-        else: # this is a brand new face, add it to our list of known faces
-            face_label = "New visitor!"
-            # Grab the image of the the face from the current frame of video
-            top, right, bottom, left = face_location
-            width = right - left
-            height = bottom - top
-            #  make sure image for new face is at least the required size
-            if height >= face_size:
-                # scale to desired height
-                face_image = cv2.resize( face.frame[top:bottom, left:right], 
-                                            (int(width*face_size/height), face_size) )
-                # Add the new face to our known face data
-                register_new_face(face_encoding, face_image)
-        face_labels.append(face_label)
-    return face_labels
 
-
-def update_display_frame_with_recent_visitors(display_frame, time_history, logger):
+def update_display_frame_with_recent_visitors(display_frame, time_history):
     """
     Creates an updated display image with recent vistor face snap shots
     """
@@ -188,6 +185,7 @@ def update_display_frame_with_recent_visitors(display_frame, time_history, logge
 
     display_frame.fill(0) # clear display frame
     # initialize
+    number_of_recent_visitors = 0
     y_position = 30
     x_position = 0
 
@@ -218,21 +216,181 @@ def update_display_frame_with_recent_visitors(display_frame, time_history, logge
                 x_position  = 0
                 y_position += (face_size + 30)                
             if (y_position+face_size+30) >= display_height: 
-                logger.log(logging.CRITICAL, "Status:Failed to display, not enough space")
+                self.logger.log(logging.CRITICAL, "Status:Failed to display, not enough space")
+            number_of_recent_visitors += 1
 
     cv2.putText(display_frame, "Face In: Urs Utzinger 2020", ( 10, display_height - 35), cv2.FONT_HERSHEY_DUPLEX, 1, (255, 255, 255), 1)
-
     return display_frame
 
+def main_loop(is_cuda):
+    """
+    This is the  main program that is terminated when users closes window or asks to stop
+    """
+    if multiproc:
+        q_img = multiprocessing.Queue()
+        q_face = multiprocessing.Queue()
+        # creating new processes
+        p = multiprocessing.Process(target=face_process, args=(q_img, q_face, is_cuda)) 
+        p.start()
+
+    # Preallocate display image and create display window
+    display_frame = np.zeros((display_height,display_width,3), np.uint8)
+    window_handle = cv2.namedWindow("Registration", cv2.WINDOW_AUTOSIZE)
+    # AUTOSIZE (does not seem to create approprite size and enlarges and crops frame)
+    # NORMAL 
+
+    # Initialize variable
+    face_locations    = []
+    tickspersecond    = cv2.getTickFrequency() # Used to profile for CPU usage
+    last_display_time = time.time()
+    last_face_save_time = time.time()
+    frame_height      = int(camera.height)
+    frame_width       = int(camera.width)
+
+    if frame_height <= 720:
+        down_sampling = 0.5
+        up_sampling = 2
+    else:
+        down_sampling = 0.25
+        up_sampling = 4
+
+    if is_cuda:
+        fmodel = "cnn"
+    else:
+        fmodel = "hog"
+    
+    update_face_display = False
+
+    while cv2.getWindowProperty("Registration", 0) >= 0:
+        current_time = time.time()
+        new_display_frame = False
+        new_face_locations = False
+
+        # Do we have new frames from the camera?
+        # < 1ms
+        ########################################
+        if camera.new_frame:
+            frame = camera.frame # 0.4ms
+            # Resize frame of video for faster face recognition processing
+            small_frame = cv2.resize(frame, (0, 0), fx=down_sampling, fy=down_sampling) # <1ms
+            # Convert the image from BGR color (which OpenCV uses) to RGB color (which face_recognition uses)            
+            # rgb_small_frame = small_frame[:, :, ::-1] # 0.02ms
+            rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+
+            new_display_frame = True
+            if multiproc: q_img.put(rgb_small_frame)
+        
+        # Update face locations
+        # > 500ms
+        #######################
+        if multiproc: # get face data from the processors
+            if not q_face.empty():
+                tmp = q_face.get()
+                face_locations, face_encodings = zip(*tmp)
+                if face_locations is not None or not face_locations == []:
+                    new_face_locations = True
+        else: # search for faces
+            if new_display_frame:
+                # Find all the face locations and face encodings in the current frame of video
+                # This is where program spends most time
+                face_locations = face_recognition.face_locations(rgb_small_frame, model="fmodel") # 50-120ms
+                face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations) # 500ms
+                if not face_locations == []:
+                    new_face_locations = True
+
+        # Do we have new face locations?
+        # < 1ms
+        ################################
+        if new_face_locations:
+            # 0.2ms
+            # Loop through each detected face and see if it is one we have seen before
+            # If so, we'll give it a label that we'll draw on top of the video.
+            face_labels = []
+            update_face_display = False
+            for face_location, face_encoding in zip(face_locations, face_encodings):
+                # See if this face is in our list of known faces
+                ################################################
+                metadata = lookup_known_face(face_encoding)
+                # If we found the face, label the face with some useful information.
+                if metadata is not None:
+                    time_at_door = datetime.now() - metadata['first_seen_this_interaction']
+                    face_label = f"{metadata['First']} {int(time_at_door.total_seconds())}s"
+                else: # this is a brand new face, add it to our list of known faces
+                    face_label = "New visitor!"
+                    # Grab the image of the the face from the current frame of video
+                    top, right, bottom, left = face_location
+                    width = right - left
+                    height = bottom - top
+                    #  make sure image for new face is at least the required size
+                    if height >= face_size:
+                        face_image = small_frame[top:bottom, left:right]
+                        # scale to desired height
+                        face_image = cv2.resize(face_image, (int(width*face_size/height), face_size))
+                        # Add the new face to our known face data
+                        register_new_face(face_encoding, face_image)
+                face_labels.append(face_label)
+                update_face_display = True
+
+                # Draw a box around each face and label each face 0.1ms
+                #######################################################
+                for (top, right, bottom, left), face_label in zip(face_locations, face_labels):
+                    # Scale back up face locations since the frame we detected in was scaled to 1/4 size
+                    top    *= up_sampling
+                    right  *= up_sampling
+                    bottom *= up_sampling
+                    left   *= up_sampling
+                    # Draw a box around the face
+                    cv2.rectangle(frame, (left, top), (right, bottom), (0, 0, 255), 2)
+                    # Draw a label with a name below the face
+                    cv2.rectangle(frame, (left, bottom - 35), (right, bottom), (0, 0, 255), cv2.FILLED)
+                    cv2.putText(frame, face_label, (left + 6, bottom - 6), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
+                    # Draw a dot on faceencoding locations
+                    for i in face_oncodings
+
+                if number_of_recent_visitors > 0:
+                    cv2.putText(frame, "Visitors at Registrtion", (5, 18), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
+
+        # Display the final frame containing video with 
+        # boxes drawn around each detected frames
+        # 10 ms
+        ################################################
+        if new_display_frame:
+            # 1ms
+            if update_face_display or current_time - last_display_time > (time_history * 60.0 / 3.0):
+                display_frame = update_display_frame_with_recent_visitors(display_frame, time_history)
+                update_face_display = False
+                last_display_time = current_time
+
+            display_frame[-frame_height-1:-1,-frame_width-1:-1,:] = frame # 0.5ms
+            cv2.imshow('Registration', display_frame) # 7ms
+
+        # We need to save our known faces back to disk 
+        # every so often in case something crashes (20mins)
+        ################################################
+        if current_time - last_face_save_time > (time_history * 60.0 / 3.0) :
+            save_known_faces()
+            last_face_save_time =  current_time
+
+        # Hit 'q' on the keyboard to quit!
+        ##################################
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            save_known_faces()
+            break
+
+        # Limit frame rate on display
+        #############################
+        time_remaining = max_display_interval - (time.time() - current_time) 
+        if time_remaining > 0.001: time.sleep(time_remaining)
+
+    # Release handle to window
+    cv2.destroyAllWindows()
+
 if __name__ == "__main__":
-    """
-    Main program
-    """
 
     logging.basicConfig(level=logging.DEBUG)
-    logger  = logging.getLogger("FaceIn")
 
-    # reate camera interface
+    # Figure out which camera driver to use
+    #######################################
     plat = platform.system()
     is_cuda = False 
     if plat == 'Windows': 
@@ -253,120 +411,10 @@ if __name__ == "__main__":
         from cv2Capture import cv2Capture
         camera = cv2Capture()
 
-    frame_height = int(camera.height)
-    frame_width  = int(camera.width)
-
-    if frame_height <= 720:
-        down_sampling = 0.5
-        up_sampling = 2
-    else:
-        down_sampling = 0.25
-        up_sampling = 4
-
-    # Create Face Processing Thread
-    face = faceProc(down_sampling = down_sampling)
-
     # Magic begins here
-    logger.log(logging.DEBUG, "Starting Capture Thread")
-    camera.start()    
+    ###################
+    print("Starting Capture")
+    camera.start()
     load_known_faces()
-    logger.log(logging.DEBUG, "Starting Face Recgnition Thread")
-    face.start()
-
-    # Preallocate display image and create display window
-    display_frame = np.zeros((display_height,display_width,3), np.uint8)
-    window_handle = cv2.namedWindow("Registration", cv2.WINDOW_AUTOSIZE)
-    # AUTOSIZE (does not seem to create approprite size and enlarges and crops frame)
-    # NORMAL 
-
-    # Initialize variable
-    last_display_time   = time.time()
-    last_face_save_time = time.time()
-    face_labels         = []
-    face_locations      = []
-    face_encodings      = []
-    
-    update_display_frame = False            # Is there new camera frame
-    update_display_frame_visitors = False   # Are there new faces and we need to update visitor list
-
-    while cv2.getWindowProperty("Registration", 0) >= 0:
-        # Main Program Loop: Execute until window closed or users persses key
-        ##############################################################################
-
-        current_time = time.time()
-
-        # Do we have new frames from the camera?
-        ########################################
-        if camera.new_frame:
-            frame = camera.frame
-            face.frame = frame
-            update_display_frame = True
-
-        # Do we have new face locations?
-        ################################
-        if face.new_face_locations:
-            face_labels = create_face_labels()
-            update_display_frame_visitors = True
-
-        # Do we have new frame to display
-        #################################
-        if update_display_frame:
-
-            # Do we have faces in our frames?
-            #################################
-            if face.faces_present:
-                face_locations = face.face_locations
-                face_encodings = face.face_encodings
-                if face_labels == []:
-                    face_labels = create_face_labels()
-                # Draw a box around each face and label each face 0.1ms
-                #######################################################
-                for (top, right, bottom, left), face_label in zip(face_locations, face_labels):
-                    # Scale back up face locations since the frame we detected in was scaled to 1/4 size
-                    top    *= up_sampling
-                    right  *= up_sampling
-                    bottom *= up_sampling
-                    left   *= up_sampling
-                    # Draw a box around the face
-                    cv2.rectangle(frame, (left, top), (right, bottom), (0, 0, 255), 2)
-                    # Draw a label with a name below the face
-                    cv2.rectangle(frame, (left, bottom - 35), (right, bottom), (0, 0, 255), cv2.FILLED)
-                    cv2.putText(frame, face_label, (left + 6, bottom - 6), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
-                    # Draw a dot on faceencoding locations
-
-            # Update recent visitor display if needed
-            #########################################
-            if update_display_frame_visitors or current_time - last_display_time > (time_history * 60.0 / 3.0):
-                display_frame = update_display_frame_with_recent_visitors(display_frame, time_history, logger)
-                update_display_frame_visitors = False
-                last_display_time = current_time
-
-            # Udpate the display
-            ####################
-            display_frame[-frame_height-1:-1,-frame_width-1:-1,:] = frame # 0.5ms
-            cv2.imshow('Registration', display_frame) # 7ms
-            update_display_frame = False # done
-
-        # We need to save our known faces back to disk 
-        # every so often in case something crashes (20mins)
-        ################################################
-        if current_time - last_face_save_time > (time_history * 60.0 / 3.0) :
-            save_known_faces()
-            last_face_save_time =  current_time
-
-        # Hit 'q' on the keyboard to quit!
-        ##################################
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            save_known_faces()
-            break
-
-        # Limit frame rate on display
-        #############################
-        time_remaining = max_display_interval - (time.time() - current_time) 
-        if time_remaining > 0.001: time.sleep(time_remaining)
-
-    # Clean up and Release handle to window
-    #######################################
+    main_loop(is_cuda)
     camera.stop()
-    face.stop()
-    cv2.destroyAllWindows()
