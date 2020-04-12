@@ -31,6 +31,7 @@ import argparse
 import os
 import re
 import dlib
+from datetime import datetime
 
 ###############################################################################
 # Intializing
@@ -42,6 +43,8 @@ known_face_metadata = []
 
 # Desired face size
 face_size       = 150
+datafile = "known_faces.dat"
+
 
 ###############################################################################
 # Functions
@@ -51,7 +54,7 @@ def save_known_faces():
     """
     Stores the face meta data and face encodings on disk
     """
-    with open("known_faces.dat", "wb") as face_data_file:
+    with open(datafile, "wb") as face_data_file:
         face_data = [known_face_encodings, known_face_metadata]
         pickle.dump(face_data, face_data_file)
         print("Known faces backed up to disk.")
@@ -62,7 +65,7 @@ def load_known_faces():
     """
     global known_face_encodings, known_face_metadata
     try:
-        with open("known_faces.dat", "rb") as face_data_file:
+        with open(datafile, "rb") as face_data_file:
             known_face_encodings, known_face_metadata = pickle.load(face_data_file)
             print("Known faces loaded from disk.")
     except FileNotFoundError as e:
@@ -113,8 +116,7 @@ if __name__ == "__main__":
     else:                  fmodel = "hog"
 
     # fmodel = "hog"
-
-    load_known_faces()
+    # load_known_faces()
 
     window_handle      = cv2.namedWindow("Registration", cv2.WINDOW_AUTOSIZE)
     window_handle_face = cv2.namedWindow("Face", cv2.WINDOW_AUTOSIZE)
@@ -133,37 +135,36 @@ if __name__ == "__main__":
         (top, right, bottom, left) = face_locations[0]
         face_encoding              = face_encodings[0]
         
-        metadata = lookup_known_face(face_encoding)
+        # metadata = lookup_known_face(face_encoding)
 
-        if metadata is None:
-            width = right - left
-            height = bottom - top
-            face_image = cv2.resize( frame[top:bottom, left:right], (int(width*face_size/height), face_size) )
-            face_image = cv2.cvtColor(face_image, cv2.COLOR_RGB2BGR)
+        width = right - left
+        height = bottom - top
+        face_image = cv2.resize( frame[top:bottom, left:right], (int(width*face_size/height), face_size) )
+        face_image = cv2.cvtColor(face_image, cv2.COLOR_RGB2BGR)
 
-            known_face_encodings.append(face_encoding)
-            known_face_metadata.append({
-                "first_seen": [],
-                "first_seen_this_interaction": [],
-                "last_seen": [],
-                "registrations": [],
-                "seen_count": 0,
-                "seen_frames": 0,
-                "face_image": face_image,
-                "First": First_Name,
-                "Last": Last_Name,
-            })
+        known_face_encodings.append(face_encoding)
+        known_face_metadata.append({
+            "first_seen": datetime.now(),
+            "first_seen_this_interaction": datetime.now(),
+            "last_seen": datetime.now(),
+            "registrations": [datetime.now()],
+            "seen_count": 0,
+            "seen_frames": 0,
+            "face_image": face_image,
+            "First": First_Name,
+            "Last": Last_Name,
+        })
 
-            cv2.imshow('Face', face_image)
+        cv2.imshow('Face', face_image)
 
-            for face_landmark in face_landmarks:
-                for facial_feature in face_landmark.keys():
-                    pts = np.array([face_landmark[facial_feature]], np.int32) 
-                    pts = pts.reshape((-1,1,2))
-                    cv2.polylines(frame, [pts], False, (255,255,255))
+        for face_landmark in face_landmarks:
+            for facial_feature in face_landmark.keys():
+                pts = np.array([face_landmark[facial_feature]], np.int32) 
+                pts = pts.reshape((-1,1,2))
+                cv2.polylines(frame, [pts], False, (255,255,255))
 
-            cv2.imshow('Registration', cv2.cvtColor(frame,cv2.COLOR_RGB2BGR)) # 7ms
-            cv2.waitKey(0)
+        cv2.imshow('Registration', cv2.cvtColor(frame,cv2.COLOR_RGB2BGR)) # 7ms
+        cv2.waitKey(0)
 
     save_known_faces()
 cv2.destroyAllWindows()

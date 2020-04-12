@@ -160,7 +160,7 @@ class piCapture(Thread):
         last_fps_time = time.time()
         last_exposure_time = last_fps_time
         num_frames = 0
-        for of in self.stream:
+        for f in self.stream:
             current_time = time.time()
             # FPS calculation
             if (current_time - last_fps_time) >= 5.0: # update frame rate every 5 secs

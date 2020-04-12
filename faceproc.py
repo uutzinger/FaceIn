@@ -106,7 +106,7 @@ class faceProc(Thread):
     # Service Routines
     ###################################################################
 
-    # Frace locations
+    # Face locations
     #################
 
     @property
