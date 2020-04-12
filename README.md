@@ -15,7 +15,7 @@ Camera settings are stored in configs.py
 
  
 # To run this program you will need to following items insalled
-  
+
 pip3 install dlib
 
 pip3 install numpy
@@ -26,7 +26,7 @@ pip3 install screeninfo
 
 On windows dlib needs a c compiler and cmake
 
-Urs Utiznger
+Urs Utzinger
 2019, 2020
 
 
